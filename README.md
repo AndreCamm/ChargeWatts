@@ -4,7 +4,7 @@ A tiny macOS menu bar app that shows the wattage your MacBook is charging at, an
 
 ![ChargeWatts in the menu bar](docs/screenshot.png)
 
-No settings window, no Dock icon, no network access, no dependencies. One Swift file, about 140 lines.
+No settings window, no Dock icon, no network access, no dependencies. One Swift file, under 200 lines.
 
 ## Features
 
@@ -12,6 +12,7 @@ No settings window, no Dock icon, no network access, no dependencies. One Swift 
 - Hidden completely when you're on battery, fully charged, or held at a charge limit
 - Click it to see power into the battery, power from the charger, the charger's rated wattage and battery percentage
 - Choose which number the menu bar shows: power into the battery (default) or power from the charger
+- Launch at Login toggle in the menu
 
 ## Install
 
@@ -43,7 +44,7 @@ Apps you build yourself aren't quarantined, so there's no Gatekeeper prompt.
 
 **Nothing appears when I open it.** That's expected unless the Mac is actively charging. Plug in a charger with the battery below full and the bolt will show up within a couple of seconds. On MacBooks with a notch, a crowded menu bar can also push items behind the notch.
 
-**Start at login.** System Settings, General, Login Items, then add ChargeWatts.
+**Start at login.** Click the item and tick **Launch at Login** (macOS 13 or later). On macOS 12, add ChargeWatts under System Settings, General, Login Items instead.
 
 **Quit.** Click the item and choose Quit. If it's hidden because you're not charging, run `killall ChargeWatts` in Terminal.
 

@@ -23,7 +23,7 @@ for arch in $ARCHS; do
     xcrun --sdk macosx swiftc -O -swift-version 5 \
         -target "$arch-apple-macos$MIN_MACOS" \
         Sources/ChargeWatts.swift \
-        -framework AppKit -framework IOKit \
+        -framework AppKit -framework IOKit -framework ServiceManagement \
         -o "$out"
     slices+=("$out")
 done

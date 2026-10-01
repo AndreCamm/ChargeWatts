@@ -3,6 +3,7 @@
 
 import AppKit
 import IOKit
+import ServiceManagement
 
 enum Mode: String {
     case battery   // power flowing into the battery (Voltage x Amperage)
@@ -71,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let percentLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let batteryChoice = NSMenuItem(title: "Show power into battery", action: #selector(pickBattery), keyEquivalent: "")
     private let inputChoice = NSMenuItem(title: "Show power from charger", action: #selector(pickInput), keyEquivalent: "")
+    private let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
 
     private var mode: Mode {
         get { Mode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .battery }
@@ -96,9 +98,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(batteryChoice)
         menu.addItem(inputChoice)
         menu.addItem(.separator())
+        loginItem.target = self
+        menu.addItem(loginItem)
         menu.addItem(NSMenuItem(title: "Quit ChargeWatts", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
 
+        updateLoginItem()
         refresh()
         timer = Timer.scheduledTimer(timeInterval: 2, target: self, selector: #selector(refresh),
                                      userInfo: nil, repeats: true)
@@ -106,6 +111,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func pickBattery() { mode = .battery }
     @objc func pickInput() { mode = .input }
+
+    // Launch at Login uses SMAppService, available from macOS 13.
+    // On macOS 12 the menu item is hidden; add the app under Login Items instead.
+    @objc func toggleLaunchAtLogin() {
+        guard #available(macOS 13.0, *) else { return }
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+                if service.status == .requiresApproval {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+            }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't change Launch at Login"
+            alert.informativeText = "\(error.localizedDescription)\n\nYou can add ChargeWatts manually in System Settings, General, Login Items."
+            alert.runModal()
+        }
+        updateLoginItem()
+    }
+
+    func updateLoginItem() {
+        if #available(macOS 13.0, *) {
+            loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        } else {
+            loginItem.isHidden = true
+        }
+    }
 
     @objc func refresh() {
         guard let r = readBattery(), r.charging else {
@@ -128,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         batteryChoice.state = mode == .battery ? .on : .off
         inputChoice.state = mode == .input ? .on : .off
         inputChoice.isEnabled = r.inputWatts != nil
+        updateLoginItem()
     }
 }
 
