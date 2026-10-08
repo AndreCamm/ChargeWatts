@@ -1,5 +1,7 @@
 // ChargeWatts: shows live charging wattage in the macOS menu bar.
-// The menu bar item is hidden whenever the Mac is not actively charging.
+// The item hides a few seconds after charging stops. Battery current is not
+// part of that decision: under load it goes negative while macOS still
+// reports that the battery is charging.
 
 import AppKit
 import IOKit
@@ -14,6 +16,7 @@ struct Reading {
     let charging: Bool
     let batteryWatts: Double
     let inputWatts: Double?
+    let systemLoad: Double?
     let adapterRating: Int?
     let percent: Int?
 }
@@ -34,13 +37,18 @@ func readBattery() -> Reading? {
     let external = (props["ExternalConnected"] as? Bool) ?? false
     let isCharging = (props["IsCharging"] as? Bool) ?? false
     let millivolts = num(props, "Voltage") ?? 0
-    let milliamps = num(props, "Amperage") ?? 0          // positive while charging
+    let milliamps = num(props, "Amperage") ?? 0          // positive into the battery
     let batteryWatts = Double(millivolts) * Double(milliamps) / 1_000_000
 
     var inputWatts: Double? = nil
-    if let telemetry = props["PowerTelemetryData"] as? [String: Any],
-       let mw = num(telemetry, "SystemPowerIn"), mw > 0 {
-        inputWatts = Double(mw) / 1000
+    var systemLoad: Double? = nil
+    if let telemetry = props["PowerTelemetryData"] as? [String: Any] {
+        if let mw = num(telemetry, "SystemPowerIn"), mw > 0 {
+            inputWatts = Double(mw) / 1000
+        }
+        if let mw = num(telemetry, "SystemLoad"), mw > 0 {
+            systemLoad = Double(mw) / 1000
+        }
     }
 
     var rating: Int? = nil
@@ -53,19 +61,62 @@ func readBattery() -> Reading? {
         percent = Int(cur * 100 / max)
     }
 
-    let charging = external && isCharging && batteryWatts >= 0.3
+    // IsCharging stays true when the Mac draws more than the adapter supplies.
+    // Positive battery watts are only a fallback for a lagging IsCharging flag.
+    let charging = external && (isCharging || batteryWatts >= 0.3)
     return Reading(charging: charging, batteryWatts: batteryWatts,
-                   inputWatts: inputWatts, adapterRating: rating, percent: percent)
+                   inputWatts: inputWatts, systemLoad: systemLoad,
+                   adapterRating: rating, percent: percent)
+}
+
+// Within 1W of zero the battery is not really charging or discharging.
+let paceBand = 1.0
+
+enum Pace {
+    case charging, losing, holding
+}
+
+func pace(of batteryWatts: Double) -> Pace {
+    if batteryWatts >= paceBand { return .charging }
+    if batteryWatts <= -paceBand { return .losing }
+    return .holding
+}
+
+func paceTitle(_ pace: Pace) -> String {
+    switch pace {
+    case .charging: return "Charging"
+    case .losing: return "Losing battery"
+    case .holding: return "Holding"
+    }
+}
+
+func headroomTitle(batteryWatts: Double, input: Double?, load: Double?) -> String? {
+    var parts: [String] = []
+    if let load, load > 0 { parts.append("Mac " + format(load)) }
+    if let input, input > 0 { parts.append("charger " + format(input)) }
+    switch pace(of: batteryWatts) {
+    case .charging:
+        parts.append(format(batteryWatts) + " into the battery")
+    case .losing:
+        parts.append("battery covering " + format(abs(batteryWatts)))
+    case .holding:
+        break
+    }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
 }
 
 func format(_ watts: Double) -> String {
-    watts < 10 ? String(format: "%.1fW", watts) : String(format: "%.0fW", watts)
+    abs(watts) < 10 ? String(format: "%.1fW", watts) : String(format: "%.0fW", watts)
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
     private var timer: Timer?
+    private var idleSince: Date?
+    private let hideDelay: TimeInterval = 6
 
+    private let paceLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let headroomLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let intoBatteryLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let fromChargerLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let ratingLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -81,17 +132,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = item.button {
-            button.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Charging")
-            button.imagePosition = .imageLeading
-            button.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        }
+        item.isVisible = false
+        configureButton()
 
         let menu = NSMenu()
-        for line in [intoBatteryLine, fromChargerLine, ratingLine, percentLine] {
+        for line in [paceLine, headroomLine, intoBatteryLine, fromChargerLine, ratingLine, percentLine] {
             line.isEnabled = false
             menu.addItem(line)
         }
+        menu.insertItem(.separator(), at: 2)
         menu.addItem(.separator())
         batteryChoice.target = self
         inputChoice.target = self
@@ -111,6 +160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func pickBattery() { mode = .battery }
     @objc func pickInput() { mode = .input }
+
+    private func configureButton() {
+        guard let button = item.button else { return }
+        button.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Charging")
+        button.imagePosition = .imageLeading
+        button.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    }
 
     // Launch at Login uses SMAppService, available from macOS 13.
     // On macOS 12 the menu item is hidden; add the app under Login Items instead.
@@ -144,14 +200,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func refresh() {
-        guard let r = readBattery(), r.charging else {
+        guard let r = readBattery() else { return }
+
+        if r.charging {
+            idleSince = nil
+        } else if idleSince == nil {
+            idleSince = Date()
+        }
+
+        // Keep the last reading through a short gap so one sample cannot
+        // remove the item and leave it stuck behind the menu bar.
+        let grace = item.isVisible
+            && (idleSince.map { Date().timeIntervalSince($0) < hideDelay } ?? false)
+        guard r.charging || grace else {
             item.isVisible = false
             return
         }
 
+        if !item.isVisible || item.button?.image == nil {
+            configureButton()
+        }
+
         let shown = (mode == .input ? r.inputWatts : nil) ?? r.batteryWatts
         item.button?.title = " " + format(shown)
+        item.length = NSStatusItem.variableLength
         item.isVisible = true
+
+        paceLine.title = paceTitle(pace(of: r.batteryWatts))
+        if let headroom = headroomTitle(batteryWatts: r.batteryWatts, input: r.inputWatts, load: r.systemLoad) {
+            headroomLine.title = headroom
+            headroomLine.isHidden = false
+        } else {
+            headroomLine.isHidden = true
+        }
 
         intoBatteryLine.title = "Into battery: " + format(r.batteryWatts)
         fromChargerLine.title = "From charger: " + (r.inputWatts.map(format) ?? "n/a")
